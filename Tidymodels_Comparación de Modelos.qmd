@@ -1,0 +1,224 @@
+---
+title: "Tidymodels: Comparando modelos"
+format: html
+editor: visual
+---
+
+# Anatomía de tidymodels:
+
+Un metapaquete que instala y carga los paquetes básicos enumerados a continuación que se necesitan para el modelado y el aprendizaje automático
+
+## rsamples:
+
+![](https://rsample.tidymodels.org/logo.png)
+
+-   Proporciona infraestructura para la división y remuestreo eficiente de datos
+
+## parsnip:
+
+![](https://parsnip.tidymodels.org/logo.png){width="173"}
+
+-   Una interfaz ordenada y unificada para modelos que puede utilizarse para probar una serie de modelos sin perderse en las minucias sintácticas de los paquetes subyacentes.
+
+## recipes:
+
+![](https://recipes.tidymodels.org/logo.png)
+
+-   Interfaz ordenada de herramientas de preprocesamiento de datos para la ingeniería de características.
+
+## workflows :
+
+![](https://workflows.tidymodels.org/logo.png){width="173"}
+
+-   Los flujos de trabajo (workflows) agrupan el preprocesamiento, el modelado y el postprocesamiento.
+
+## tune:
+
+![](images/tune.png){width="173"}
+
+-   Le ayuda a optimizar los hiperparámetros de su modelo y los pasos de preprocesamiento.
+
+## yardstick:
+
+![](images/yardstick.png){width="173"}
+
+-   Mide la eficacia de los modelos mediante métricas de rendimiento.
+
+## dials:
+
+![](images/dials.png){width="173"}
+
+-   Contiene herramientas para crear y gestionar los valores de los parámetros de ajuste y está diseñado para integrarse bien con el paquete parsnip
+
+## broom:
+
+![](https://broom.tidymodels.org/logo.png){width="200"}
+
+\* resume la información clave sobre los modelos en tibbles
+
+![](https://web.nmsu.edu/~gchavez7/red_pill_blue_pill-copy3.gif)
+
+## Carga de paquetes
+
+```{r}
+library(tidyverse) # Arreglo de los datos
+library(tidymodels) #Ecosistema ML
+library(skimr)  #EDA rápido
+library(GGally) #Pair plots
+library(themis) #Funciones para #Funciones de receta para hacer frente a los desequilibrios de clase
+library(janitor) #exploración y limpieza inicial de datos
+```
+
+## Carga de datos Wisconsin Breast Cancer
+
+```{r}
+load("wbc.RData")
+
+
+glimpse(wbc)
+  
+```
+
+## La división inicial de los datos y el grupo de validación
+
+```{r}
+set.seed(777)
+wbc_split <- initial_split(wbc, prop = 0.75, strata = diagnosis)
+
+wbc_train <- training(wbc_split)
+wbc_test <- testing(wbc_split)
+```
+
+```{r}
+set.seed(777)
+wbc_folds <- vfold_cv(wbc_train,strata = diagnosis)
+```
+
+## Evaluación de los datos
+
+```{r}
+wbc %>% tabyl(diagnosis)
+
+skim(wbc)
+
+ggpairs(wbc[1:7], aes(color = diagnosis))
+```
+
+## Especificación de modelos
+
+```{r}
+#Modelo 1
+knn_model <- nearest_neighbor(neighbors = tune(), 
+                              weight_func = tune(),
+                              dist_power = tune()) %>% 
+             set_engine("kknn") %>% 
+             set_mode("classification")
+
+tree_model <- decision_tree(cost_complexity = tune(),
+                            tree_depth = tune(),
+                            min_n = tune()) %>%
+              set_engine("rpart") %>% 
+              set_mode("classification")
+
+mis_modelos <- list(mod1 = knn_model, mod2= tree_model)
+              
+
+```
+
+## Especificación de procesamiento con recipes
+
+```{r}
+recipe_1 <- recipe(diagnosis ~., data = wbc_train) %>%
+            step_normalize(all_predictors()) %>% 
+            themis::step_upsample(diagnosis) %>% 
+            prep()
+
+recipe_2 <- recipe(diagnosis ~., data = wbc_train) %>%
+            step_normalize(all_predictors()) %>% 
+            prep()
+            
+
+mis_recipes <- list(recipe_1, recipe_2)
+```
+
+### Verificación del balanceo de las clases
+
+```{r}
+juice(recipe_1) %>% tabyl(diagnosis)
+
+juice(recipe_2) %>% tabyl(diagnosis)
+```
+
+## Establecimiento del flujo de trabajo
+
+```{r}
+wf_todos <- workflow_set(
+  preproc = mis_recipes,
+  models = mis_modelos,
+  cross = TRUE
+)
+```
+
+### Establecimiento de las métricas
+
+```{r}
+mis_metricas <- metric_set(roc_auc, accuracy, specificity, sensitivity)
+```
+
+## Ejecución del Modelo
+
+```{r}
+library(tictoc)
+clus <- parallel::makeCluster(8)
+doParallel::registerDoParallel(clus)
+tic()
+wf_resultados <- wf_todos %>% 
+          workflow_map(
+            resamples = wbc_folds,
+            verbose = TRUE,
+            metrics = mis_metricas,
+            fn = "tune_grid",
+            grid = 20
+            
+          )
+parallel::stopCluster(clus)
+toc()
+```
+
+## Buscando el mejor modelo
+
+Representación gráfica de las métricas de cada modelo
+
+```{r}
+wf_resultados %>% autoplot()
+```
+
+### ranking
+
+```{r}
+wf_resultados %>% rank_results()
+```
+
+```{r}
+best_result <- wf_resultados %>% 
+  extract_workflow_set_result("recipe_2_mod1") %>% 
+  select_best(metric = "roc_auc")
+
+best_result
+```
+
+```{r}
+knn_fit <- wf_resultados %>%
+           extract_workflow("recipe_2_mod1") %>% 
+  finalize_workflow(best_result) %>% 
+  fit(wbc_train)
+  
+```
+
+## Predicción
+
+```{r}
+knn_fit %>% 
+  predict(new_data = wbc_test, type = "prob") %>% 
+  bind_cols(wbc_test) %>% select(diagnosis, .pred_M, ,.pred_B) %>% roc_curve(truth = diagnosis, estimate = .pred_M) %>% autoplot()
+```
